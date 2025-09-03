@@ -16,7 +16,7 @@
 #include "moba_attn/moba_attn_utils.hpp"
 #include "moba_attn/moba_attn.h"
 
-template <typename input_type, int moba_block_size, int kBlockM, int kMaxN, int tokens_per_block, bool need_k_mean>
+template <typename input_type, int plas_block_size, int kBlockM, int kMaxN, int tokens_per_block, bool need_k_mean>
 __global__ void fused_block_mean_and_rope_kernel(
         const input_type *qkv_input,
         const input_type *qkv_bias,
@@ -49,7 +49,7 @@ __global__ void fused_block_mean_and_rope_kernel(
     const int bidh = blockIdx.y;
     const int bidt_q = blockIdx.z * tokens_per_block;
     const int bidt_v = blockIdx.z * tokens_per_block;
-    const int bidt_k = need_k_mean ? blockIdx.z * moba_block_size : blockIdx.z * tokens_per_block;
+    const int bidt_k = need_k_mean ? blockIdx.z * plas_block_size : blockIdx.z * tokens_per_block;
     const int tidx = threadIdx.x;
     const int lane_id = tidx % 32;
     const int warp_id = tidx / 32;
@@ -124,7 +124,7 @@ __global__ void fused_block_mean_and_rope_kernel(
 
             const input_type* qkv = qkv_input + cu_seq_q[bidb] * hidden + bias_idx;
 
-            for (int i = 0; i < moba_block_size; i += tokens_per_block) {
+            for (int i = 0; i < plas_block_size; i += tokens_per_block) {
                 const int cur_token = bidt_k + i + row_idx;
                 if (cur_token < seq_len) {
                     src.load_from(qkv + cur_token * hidden);
@@ -172,11 +172,11 @@ __global__ void fused_block_mean_and_rope_kernel(
                     local_sum_half += local_sum_mem_half[tidx + i * (kHeadDim / 2)];
                 }
 
-                float inv_tokens_sum = fdividef(1.0f, min(seq_len - bidt_k, moba_block_size));
+                float inv_tokens_sum = fdividef(1.0f, min(seq_len - bidt_k, plas_block_size));
 
                 local_sum_half *= float_2_half2<input_type>(inv_tokens_sum);
 
-                const int store_mean_idx = ((bidb * kMaxN + blockIdx.z + seq_len_start / moba_block_size) * kv_head_num * kHeadDim + (bidh - head_num) * kHeadDim) / 2 + tidx;
+                const int store_mean_idx = ((bidb * kMaxN + blockIdx.z + seq_len_start / plas_block_size) * kv_head_num * kHeadDim + (bidh - head_num) * kHeadDim) / 2 + tidx;
 
                 reinterpret_cast<pack_half*>(k_gate_mean)[store_mean_idx] = local_sum_half;
             }
@@ -195,7 +195,7 @@ __global__ void fused_block_mean_and_rope_kernel(
     }
 }
 
-template <typename input_type, int moba_block_size, int kBlockM, int kMaxN>
+template <typename input_type, int plas_block_size, int kBlockM, int kMaxN>
 void fused_block_mean_and_rope(
         const input_type *qkv_input,
         const input_type *qkv_bias,
@@ -216,7 +216,7 @@ void fused_block_mean_and_rope(
         const int max_input_length,
         cudaStream_t stream) {
 
-    static_assert(moba_block_size >= 64, "moba_block_size must be at least 64");
+    static_assert(plas_block_size >= 64, "plas_block_size must be at least 64");
     constexpr int kPackSize = 16 / sizeof(input_type);
     constexpr int kHeadDim = 128;
     constexpr int kThreads = 128;
@@ -227,7 +227,7 @@ void fused_block_mean_and_rope(
     grid_dims.z = (max_seq_q + tokens_per_block - 1) / tokens_per_block;
 
     if (k_gate_mean != nullptr) {
-        fused_block_mean_and_rope_kernel<input_type, moba_block_size, kBlockM, kMaxN, tokens_per_block, true>
+        fused_block_mean_and_rope_kernel<input_type, plas_block_size, kBlockM, kMaxN, tokens_per_block, true>
         <<<grid_dims, kThreads, 0, stream>>>(
             qkv_input,
             qkv_bias,
@@ -246,7 +246,7 @@ void fused_block_mean_and_rope(
             kv_head_num,
             max_input_length);
     } else {
-        fused_block_mean_and_rope_kernel<input_type, moba_block_size, kBlockM, kMaxN, tokens_per_block, false>
+        fused_block_mean_and_rope_kernel<input_type, plas_block_size, kBlockM, kMaxN, tokens_per_block, false>
         <<<grid_dims, kThreads, 0, stream>>>(
             qkv_input,
             qkv_bias,
@@ -289,13 +289,13 @@ void FusedBlockMeanAndRope(
 
     constexpr int kBlockM = 128;
     constexpr int kBlockN = 128;
-    constexpr int kMobaBlockSize = 128;
+    constexpr int kPlasBlockSize = 128;
     constexpr int kMaxN = 1024;
 
     if (k_input.dtype() == paddle::DataType::FLOAT16) {
         using T = phi::dtype::float16;
         using cute_type = typename cuteType<T>::type;
-        fused_block_mean_and_rope<cute_type, kMobaBlockSize, kBlockM, kMaxN>(
+        fused_block_mean_and_rope<cute_type, kPlasBlockSize, kBlockM, kMaxN>(
             reinterpret_cast<cute_type *>(const_cast<T*>(qkv_out.data<T>())),
             qkv_bias ? reinterpret_cast<cute_type *>(const_cast<T*>(qkv_bias.get().data<T>())) : nullptr,
             reinterpret_cast<cute_type *>(const_cast<T*>(k_block_means.data<T>())),
@@ -317,7 +317,7 @@ void FusedBlockMeanAndRope(
     } else if (k_input.dtype() == paddle::DataType::BFLOAT16) {
         using T = phi::dtype::bfloat16;
         using cute_type = typename cuteType<T>::type;
-        fused_block_mean_and_rope<cute_type, kMobaBlockSize, kBlockM, kMaxN>(
+        fused_block_mean_and_rope<cute_type, kPlasBlockSize, kBlockM, kMaxN>(
             reinterpret_cast<cute_type *>(const_cast<T*>(qkv_out.data<T>())),
             qkv_bias ? reinterpret_cast<cute_type *>(const_cast<T*>(qkv_bias.get().data<T>())) : nullptr,
             reinterpret_cast<cute_type *>(const_cast<T*>(k_block_means.data<T>())),

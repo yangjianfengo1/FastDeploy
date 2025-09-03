@@ -17,7 +17,7 @@
 #include "moba_attn/moba_attn.h"
 
 
-template <typename T, int knthreads, int moba_block_size, int kBlockMaxN, int searchtimes>
+template <typename T, int knthreads, int plas_block_size, int kBlockMaxN, int searchtimes>
 __global__ void qk_gate_sort_decoder_kernel(
         const T* qk_gate_weight,
         int * qk_gate_topk_idx,
@@ -27,17 +27,17 @@ __global__ void qk_gate_sort_decoder_kernel(
         const int kGqaGroupSize,
         const int top_k_left,
         const int top_k_right,
-        const int use_moba_seq_limit) {
+        const int use_plas_seq_limit) {
 
     const int bidb = blockIdx.x;
     const int bidh = blockIdx.y;
     const int tidx = threadIdx.x;
     const int bidh_kv = bidh / kGqaGroupSize;
 
-    if (decoder_seq_lens[bidb] == 0 || decoder_seq_lens[bidb] < use_moba_seq_limit) {
+    if (decoder_seq_lens[bidb] == 0 || decoder_seq_lens[bidb] < use_plas_seq_limit) {
         return;
     }
-    const int seq_len = (decoder_seq_lens[bidb] + moba_block_size - 1) / moba_block_size;
+    const int seq_len = (decoder_seq_lens[bidb] + plas_block_size - 1) / plas_block_size;
 
     constexpr int kPackSize = kBlockMaxN / knthreads;
 
@@ -115,7 +115,7 @@ __global__ void qk_gate_sort_decoder_kernel(
     }
 }
 
-template <int kBlockMaxN, int moba_block_size, typename T>
+template <int kBlockMaxN, int plas_block_size, typename T>
 void qk_gate_sort_decoder(
         const T* qk_gate_weight,
         int * qk_gate_topk_idx,
@@ -125,7 +125,7 @@ void qk_gate_sort_decoder(
         const int batch_size,
         const int top_k_left,
         const int top_k_right,
-        const int use_moba_seq_limit,
+        const int use_plas_seq_limit,
         cudaStream_t stream) {
 
     const int gqa_group_size = head_num / kv_head_num;
@@ -136,7 +136,7 @@ void qk_gate_sort_decoder(
     grid_dims.y = head_num;
     const int searchtimes = 6;
 
-    constexpr auto kernel = qk_gate_sort_decoder_kernel<T, knthreads, moba_block_size, kBlockMaxN, searchtimes>;
+    constexpr auto kernel = qk_gate_sort_decoder_kernel<T, knthreads, plas_block_size, kBlockMaxN, searchtimes>;
 
     kernel<<<grid_dims, knthreads, 0, 0>>>(
         qk_gate_weight,
@@ -147,7 +147,7 @@ void qk_gate_sort_decoder(
         gqa_group_size,
         top_k_left,
         top_k_right,
-        use_moba_seq_limit);
+        use_plas_seq_limit);
 }
 
 
@@ -160,15 +160,15 @@ std::vector<paddle::Tensor> DispatchQkSortDecoder(
         const int kv_head_num,
         const int top_k_left,
         const int top_k_right,
-        const int use_moba_seq_limit) {
+        const int use_plas_seq_limit) {
 
-    constexpr int kMobaBlockSize = 128;
+    constexpr int kPlasBlockSize = 128;
     constexpr int kMaxN = 1024;
 
     const int batch_size = seq_len_decoder.dims()[0];
     paddle::Tensor qk_gate_topk_idx = paddle::empty({batch_size, kv_head_num, kMaxN}, paddle::DataType::INT32, qk_gate_weight.place());
 
-    qk_gate_sort_decoder<kMaxN, kMobaBlockSize, T>(
+    qk_gate_sort_decoder<kMaxN, kPlasBlockSize, T>(
         qk_gate_weight.data<T>(),
         qk_gate_topk_idx.data<int>(),
         seq_len_decoder.data<int>(),
@@ -177,7 +177,7 @@ std::vector<paddle::Tensor> DispatchQkSortDecoder(
         batch_size,
         top_k_left,
         top_k_right,
-        use_moba_seq_limit,
+        use_plas_seq_limit,
         qk_gate_weight.stream()
     );
 
@@ -192,7 +192,7 @@ std::vector<paddle::Tensor> QkSortDecoder(
         const int kv_head_num,
         const int top_k_left,
         const int top_k_right,
-        const int use_moba_seq_limit) {
+        const int use_plas_seq_limit) {
 
     if (qk_gate_weight.dtype() == paddle::DataType::FLOAT16) {
         return std::move(
@@ -204,7 +204,7 @@ std::vector<paddle::Tensor> QkSortDecoder(
                 kv_head_num,
                 top_k_left,
                 top_k_right,
-                use_moba_seq_limit)
+                use_plas_seq_limit)
         );
     } else if (qk_gate_weight.dtype() == paddle::DataType::BFLOAT16) {
         return std::move(
@@ -216,12 +216,12 @@ std::vector<paddle::Tensor> QkSortDecoder(
                 kv_head_num,
                 top_k_left,
                 top_k_right,
-                use_moba_seq_limit)
+                use_plas_seq_limit)
         );
     }
 }
 
-PD_BUILD_OP(moba_qk_sort_decoder)
+PD_BUILD_OP(plas_qk_sort_decoder)
     .Inputs({
         "qk_gate_weight",
         "seq_len_encoder",
@@ -231,6 +231,6 @@ PD_BUILD_OP(moba_qk_sort_decoder)
         "kv_head_num: int",
         "top_k_left: int",
         "top_k_right: int",
-        "use_moba_seq_limit: int"})
+        "use_plas_seq_limit: int"})
     .Outputs({"qk_gate_topk_idx"})
     .SetKernelFn(PD_KERNEL(QkSortDecoder));

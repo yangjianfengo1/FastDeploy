@@ -70,7 +70,7 @@ __global__ void write_encoder_cachekv_c16(
     }
 }
 
-void MobaEncoderAttnWriteCacheKv(
+void PlasEncoderAttnWriteCacheKv(
         const paddle::Tensor& k_input,
         const paddle::Tensor& v_input,
         const paddle::Tensor& cu_seq_k,
@@ -135,7 +135,7 @@ void MobaEncoderAttnWriteCacheKv(
     }
 }
 
-PD_BUILD_OP(moba_encoder_attn_write_cache_kv)
+PD_BUILD_OP(plas_encoder_attn_write_cache_kv)
     .Inputs({
         "k_input",
         "v_input",
@@ -160,4 +160,4 @@ PD_BUILD_OP(moba_encoder_attn_write_cache_kv)
     .Outputs({"cache_k_out", "cache_v_out"})
     .SetInplaceMap({{"cache_k", "cache_k_out"},
                     {"cache_v", "cache_v_out"}})
-    .SetKernelFn(PD_KERNEL(MobaEncoderAttnWriteCacheKv));
+    .SetKernelFn(PD_KERNEL(PlasEncoderAttnWriteCacheKv));

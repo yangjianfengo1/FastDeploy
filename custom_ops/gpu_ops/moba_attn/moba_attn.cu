@@ -16,7 +16,7 @@
 #include "moba_attn.h"
 
 
-std::vector<paddle::Tensor> MobaAttention(
+std::vector<paddle::Tensor> PlasAttention(
         const paddle::Tensor& qkv,
         const paddle::Tensor& q_input,
         const paddle::Tensor& k_input,
@@ -46,18 +46,18 @@ std::vector<paddle::Tensor> MobaAttention(
         const int max_seq_len,
         const int max_enc_len_this_time,
         const int max_dec_len_this_time,
-        const int moba_encoder_top_k_left,
-        const int moba_encoder_top_k_right,
-        const int moba_use_encoder_seq_limit,
-        const int moba_decoder_top_k_left,
-        const int moba_decoder_top_k_right,
-        const int moba_use_decoder_seq_limit,
-        const bool moba_use_mlp,
+        const int plas_encoder_top_k_left,
+        const int plas_encoder_top_k_right,
+        const int plas_use_encoder_seq_limit,
+        const int plas_decoder_top_k_left,
+        const int plas_decoder_top_k_right,
+        const int plas_use_decoder_seq_limit,
+        const bool plas_use_mlp,
         const std::string &cache_quant_type_str) {
 
     paddle::Tensor out = paddle::empty({qkv.dims()[0], head_num * head_dim}, qkv.dtype(), qkv.place());
     if (max_dec_len_this_time > 0) {
-        MobaDecoderAttnWriteCacheKv(
+        PlasDecoderAttnWriteCacheKv(
             qkv,
             q_input,
             cu_seq_q,
@@ -82,7 +82,7 @@ std::vector<paddle::Tensor> MobaAttention(
             max_seq_len,
             cache_quant_type_str);
 
-        auto qk_gate_weight = MobaQKGemm(
+        auto qk_gate_weight = PlasQKGemm(
             q_input,
             k_block_means,
             seq_len_encoder,
@@ -94,7 +94,7 @@ std::vector<paddle::Tensor> MobaAttention(
             head_num,
             kv_head_num,
             true,
-            moba_use_decoder_seq_limit
+            plas_use_decoder_seq_limit
         )[0];
 
         auto qk_gate_topk_idx = QkSortDecoder(
@@ -103,12 +103,12 @@ std::vector<paddle::Tensor> MobaAttention(
             seq_len_decoder,
             head_num,
             kv_head_num,
-            moba_decoder_top_k_left,
-            moba_decoder_top_k_right,
-            moba_use_decoder_seq_limit
+            plas_decoder_top_k_left,
+            plas_decoder_top_k_right,
+            plas_use_decoder_seq_limit
         )[0];
 
-        MobaDecoderAttn(
+        PlasDecoderAttn(
             q_input,
             seq_len_encoder,
             seq_len_decoder,
@@ -129,7 +129,7 @@ std::vector<paddle::Tensor> MobaAttention(
             kv_head_num,
             head_dim,
             max_seq_len,
-            moba_use_decoder_seq_limit,
+            plas_use_decoder_seq_limit,
             max_dec_len_this_time,
             max_dec_len_this_time,
             cache_quant_type_str
@@ -158,7 +158,7 @@ std::vector<paddle::Tensor> MobaAttention(
             cache_quant_type_str
         );
 
-        MobaEncoderAttnWriteCacheKv(
+        PlasEncoderAttnWriteCacheKv(
             k_input,
             v_input,
             cu_seq_k,
@@ -201,10 +201,8 @@ std::vector<paddle::Tensor> MobaAttention(
             cache_quant_type_str
         );
 
-        paddle::Tensor *k_gate_weight = const_cast<paddle::Tensor*>(&k_block_means);
-
-        if (moba_use_mlp && attn_gate_weight) {
-            paddle::Tensor k_gate_mlp = MobaMlpEinsum(
+        if (plas_use_mlp && attn_gate_weight) {
+            paddle::Tensor k_gate_mlp = PlasMlpEinsum(
                 k_input,
                 attn_gate_weight.get(),
                 seq_len_encoder,
@@ -213,66 +211,114 @@ std::vector<paddle::Tensor> MobaAttention(
                 max_seq_len,
                 kv_head_num
             )[0];
-            k_gate_weight = &k_gate_mlp;
+
+            auto qk_gate_weight = PlasQKGemm(
+                q_input,
+                k_gate_mlp,
+                seq_len_encoder,
+                seq_len_decoder,
+                cu_seq_q,
+                cu_seq_k,
+                max_enc_len_this_time,
+                max_enc_len_this_time + max_dec_len_this_time,
+                head_num,
+                kv_head_num,
+                false,
+                plas_use_encoder_seq_limit
+            )[0];
+
+            auto qk_gate_topk_idx = QkSortEncoder(
+                qk_gate_weight,
+                seq_len_encoder,
+                seq_len_decoder,
+                cu_seq_q,
+                cu_seq_k,
+                cu_seq_q_pack,
+                q_pack_tokens,
+                max_enc_len_this_time,
+                max_enc_len_this_time + max_dec_len_this_time,
+                head_num,
+                kv_head_num,
+                plas_encoder_top_k_left,
+                plas_encoder_top_k_right,
+                plas_use_mlp && !attn_gate_weight ? max_seq_len : plas_use_encoder_seq_limit)[0];
+
+            PlasEncoderAttn(
+                q_input,
+                k_input,
+                v_input,
+                qk_gate_topk_idx,
+                cu_seq_q,
+                cu_seq_k,
+                cu_seq_q_pack,
+                seq_len_encoder,
+                seq_len_decoder,
+                out,
+                max_enc_len_this_time,
+                max_enc_len_this_time + max_dec_len_this_time,
+                head_num,
+                kv_head_num,
+                head_dim,
+                max_seq_len
+            );
+        } else {
+            auto qk_gate_weight = PlasQKGemm(
+                q_input,
+                k_block_means,
+                seq_len_encoder,
+                seq_len_decoder,
+                cu_seq_q,
+                cu_seq_k,
+                max_enc_len_this_time,
+                max_enc_len_this_time + max_dec_len_this_time,
+                head_num,
+                kv_head_num,
+                false,
+                plas_use_encoder_seq_limit
+            )[0];
+
+            auto qk_gate_topk_idx = QkSortEncoder(
+                qk_gate_weight,
+                seq_len_encoder,
+                seq_len_decoder,
+                cu_seq_q,
+                cu_seq_k,
+                cu_seq_q_pack,
+                q_pack_tokens,
+                max_enc_len_this_time,
+                max_enc_len_this_time + max_dec_len_this_time,
+                head_num,
+                kv_head_num,
+                plas_encoder_top_k_left,
+                plas_encoder_top_k_right,
+                plas_use_mlp && !attn_gate_weight ? max_seq_len : plas_use_encoder_seq_limit)[0];
+
+            PlasEncoderAttn(
+                q_input,
+                k_input,
+                v_input,
+                qk_gate_topk_idx,
+                cu_seq_q,
+                cu_seq_k,
+                cu_seq_q_pack,
+                seq_len_encoder,
+                seq_len_decoder,
+                out,
+                max_enc_len_this_time,
+                max_enc_len_this_time + max_dec_len_this_time,
+                head_num,
+                kv_head_num,
+                head_dim,
+                max_seq_len
+            );
         }
-
-        auto qk_gate_weight = MobaQKGemm(
-            q_input,
-            *k_gate_weight,
-            seq_len_encoder,
-            seq_len_decoder,
-            cu_seq_q,
-            cu_seq_k,
-            max_enc_len_this_time,
-            max_enc_len_this_time + max_dec_len_this_time,
-            head_num,
-            kv_head_num,
-            false,
-            moba_use_encoder_seq_limit
-        )[0];
-
-
-        auto qk_gate_topk_idx = QkSortEncoder(
-            qk_gate_weight,
-            seq_len_encoder,
-            seq_len_decoder,
-            cu_seq_q,
-            cu_seq_k,
-            cu_seq_q_pack,
-            q_pack_tokens,
-            max_enc_len_this_time,
-            max_enc_len_this_time + max_dec_len_this_time,
-            head_num,
-            kv_head_num,
-            moba_encoder_top_k_left,
-            moba_encoder_top_k_right,
-            moba_use_mlp && !attn_gate_weight ? max_seq_len : moba_use_encoder_seq_limit)[0];
-
-        MobaEncoderAttn(
-            q_input,
-            k_input,
-            v_input,
-            qk_gate_topk_idx,
-            cu_seq_q,
-            cu_seq_k,
-            cu_seq_q_pack,
-            seq_len_encoder,
-            seq_len_decoder,
-            out,
-            max_enc_len_this_time,
-            max_enc_len_this_time + max_dec_len_this_time,
-            head_num,
-            kv_head_num,
-            head_dim,
-            max_seq_len
-        );
     }
 
     return {out};
 }
 
 
-PD_BUILD_OP(moba_attention)
+PD_BUILD_OP(plas_attention)
     .Inputs({
         "qkv",
         "q_input",
@@ -304,13 +350,13 @@ PD_BUILD_OP(moba_attention)
         "max_seq_len: int",
         "max_enc_len_this_time: int",
         "max_dec_len_this_time: int",
-        "moba_encoder_top_k_left: int",
-        "moba_encoder_top_k_right: int",
-        "moba_use_encoder_seq_limit: int",
-        "moba_decoder_top_k_left: int",
-        "moba_decoder_top_k_right: int",
-        "moba_use_decoder_seq_limit: int",
-        "moba_use_mlp: bool",
+        "plas_encoder_top_k_left: int",
+        "plas_encoder_top_k_right: int",
+        "plas_use_encoder_seq_limit: int",
+        "plas_decoder_top_k_left: int",
+        "plas_decoder_top_k_right: int",
+        "plas_use_decoder_seq_limit: int",
+        "plas_use_mlp: bool",
         "cache_quant_type_str: std::string"})
     .Outputs({
         "out",
@@ -327,4 +373,4 @@ PD_BUILD_OP(moba_attention)
         {"key_cache", "key_cache_out"},
         {"value_cache", "value_cache_out"},
         {"k_block_means", "k_block_means_out"}})
-    .SetKernelFn(PD_KERNEL(MobaAttention));
+    .SetKernelFn(PD_KERNEL(PlasAttention));

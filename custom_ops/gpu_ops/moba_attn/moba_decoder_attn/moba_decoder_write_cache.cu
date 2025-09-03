@@ -16,8 +16,8 @@
 #include "../moba_attn_utils.hpp"
 #include "moba_attn/moba_attn.h"
 
-template <typename T, int kBlockSize, int kHeadDim, int moba_block_size, int kMaxN>
-__global__ void moba_decoder_attn_write_c16(
+template <typename T, int kBlockSize, int kHeadDim, int plas_block_size, int kMaxN>
+__global__ void plas_decoder_attn_write_c16(
         const T * qkv_out,
         const T * qkv_bias,
         T * q_input,
@@ -81,12 +81,12 @@ __global__ void moba_decoder_attn_write_c16(
         T * cache = cache_k + physical_block_number * kv_head_num * kBlockSize * kHeadDim + bidh * kBlockSize * kHeadDim + tidx * kPackSize + token_in_blocks * kHeadDim;
         src.store_to(cache);
 
-        const int seq_len_block = seq_len / moba_block_size;
+        const int seq_len_block = seq_len / plas_block_size;
 
         const int store_mean_idx = (bidb * kMaxN + seq_len_block) * kv_head_num * kHeadDim + bidh * kHeadDim + tidx * kPackSize;
 
-        if (seq_len % moba_block_size != 0) {
-            const int token_num_prev = seq_len % moba_block_size;
+        if (seq_len % plas_block_size != 0) {
+            const int token_num_prev = seq_len % plas_block_size;
             const float inv_tokens_sum = fdividef(1.0f, token_num_prev + 1);
             k_prev.load_from(k_block_means + store_mean_idx);
 
@@ -107,7 +107,7 @@ __global__ void moba_decoder_attn_write_c16(
 
 }
 
-void MobaDecoderAttnWriteCacheKv(
+void PlasDecoderAttnWriteCacheKv(
         const paddle::Tensor& qkv_out,
         const paddle::Tensor& q_input,
         const paddle::Tensor& cu_seq_q,
@@ -134,7 +134,7 @@ void MobaDecoderAttnWriteCacheKv(
 
     constexpr int kThreads = 32;
     constexpr int kHeadDim = 128;
-    constexpr int kMobaBlockSize = 128;
+    constexpr int kPlasBlockSize = 128;
     constexpr int kMaxN = 1024;
     assert(kHeadDim == head_dim);
     constexpr int kBlockSize = 64;
@@ -146,7 +146,7 @@ void MobaDecoderAttnWriteCacheKv(
         grid_dims.y = batch_size;
         if (qkv_out.dtype() == paddle::DataType::FLOAT16) {
             using T = phi::dtype::float16;
-            moba_decoder_attn_write_c16<T, kBlockSize, kHeadDim, kMobaBlockSize, kMaxN><<<grid_dims, kThreads, 0, qkv_out.stream()>>>(
+            plas_decoder_attn_write_c16<T, kBlockSize, kHeadDim, kPlasBlockSize, kMaxN><<<grid_dims, kThreads, 0, qkv_out.stream()>>>(
                 qkv_out.data<T>(),
                 qkv_bias ? qkv_bias.get().data<T>() : nullptr,
                 const_cast<T*>(q_input.data<T>()),
@@ -165,7 +165,7 @@ void MobaDecoderAttnWriteCacheKv(
                 max_input_length);
         } else if (qkv_out.dtype() == paddle::DataType::BFLOAT16) {
             using T = phi::dtype::bfloat16;
-            moba_decoder_attn_write_c16<T, kBlockSize, kHeadDim, kMobaBlockSize, kMaxN><<<grid_dims, kThreads, 0, qkv_out.stream()>>>(
+            plas_decoder_attn_write_c16<T, kBlockSize, kHeadDim, kPlasBlockSize, kMaxN><<<grid_dims, kThreads, 0, qkv_out.stream()>>>(
                 qkv_out.data<T>(),
                 qkv_bias ? qkv_bias.get().data<T>() : nullptr,
                 const_cast<T*>(q_input.data<T>()),

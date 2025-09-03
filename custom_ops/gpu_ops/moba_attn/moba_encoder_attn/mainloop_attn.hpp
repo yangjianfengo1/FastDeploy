@@ -197,7 +197,7 @@ struct CollectiveMainloopAttn {
     }
 
 
-    template <bool UseMoba, typename SharedStorage>
+    template <bool UsePlas, typename SharedStorage>
     CUTLASS_DEVICE void
     load(Params const& mainloop_params,
          MainloopPipeline pipeline_k,
@@ -261,7 +261,7 @@ struct CollectiveMainloopAttn {
             for (; n_block > 0; ) {
                 pipeline_k.producer_acquire(smem_pipe_write_k);
                 int pre_idx = 1;
-                if constexpr (UseMoba) {
+                if constexpr (UsePlas) {
                     pre_idx = qk_gate_topk_idx[idx];
                 }
                 copy(mainloop_params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write_k), mcast_mask_kv), tKgK(_, n_block - pre_idx), tKsK(_, smem_pipe_write_k.index()));
@@ -316,7 +316,7 @@ struct CollectiveMainloopAttn {
     }
 
 
-    template <bool UseMoba, typename SharedStorage, typename FrgTensorO, typename Softmax>
+    template <bool UsePlas, typename SharedStorage, typename FrgTensorO, typename Softmax>
     CUTLASS_DEVICE void
     mma(Params const& mainloop_params,
         MainloopPipeline pipeline_k,
@@ -406,7 +406,7 @@ struct CollectiveMainloopAttn {
             ++smem_pipe_read_k;
             ++smem_pipe_read_v;
             cute::copy(make_tensor(convert_type<Element>(tSrS).data(), convert_layout_acc_Aregs<typename Ktraits::TiledMma1>(tSrS.layout())), tOrP);
-            if constexpr (UseMoba) {
+            if constexpr (UsePlas) {
                 n_block -= qk_gate_topk_idx[idx];
                 idx += 1;
             } else {

@@ -25,7 +25,7 @@
 #include "cutlass/cluster_launch.hpp"
 #include "cutlass/arch/reg_reconfig.h"
 
-template <typename input_type, int kBlockM, int kBlockN, int kMobaBlockSize, int kMaxN, int kHeadDim, bool is_split_kv>
+template <typename input_type, int kBlockM, int kBlockN, int kPlasBlockSize, int kMaxN, int kHeadDim, bool is_split_kv>
 __global__ void qk_gemm_kernel(
         const input_type *q_input,
         const input_type *k_gate_mean,
@@ -34,7 +34,7 @@ __global__ void qk_gemm_kernel(
         const int *seq_len_decoder,
         const int *cu_seq_q,
         const int *cu_seq_k,
-        const int use_moba_seq_limit,
+        const int use_plas_seq_limit,
         const int max_seq_q,
         const int max_seq_k,
         const int head_num,
@@ -137,13 +137,13 @@ __global__ void qk_gemm_kernel(
     int remain_q_seq;
 
     if constexpr (is_split_kv) {
-        if (seq_len_k < use_moba_seq_limit || seq_len_k == 0) {
+        if (seq_len_k < use_plas_seq_limit || seq_len_k == 0) {
             return;
         }
         mn_block *= kBlockN;
         q_head_stride = kHeadDim;
         qk_head_stride = kMaxN;
-        if (mn_block >= (seq_len_k + kMobaBlockSize - 1) / kMobaBlockSize) {
+        if (mn_block >= (seq_len_k + kPlasBlockSize - 1) / kPlasBlockSize) {
             return;
         }
         offset_q = cu_seq_q[bidb] * head_num * kHeadDim + bidh * kGQA_groupsize * kHeadDim;
@@ -151,7 +151,7 @@ __global__ void qk_gemm_kernel(
         offset_qk = bidb * head_num * kMaxN + bidh * kGQA_groupsize * kMaxN + mn_block;
         remain_q_seq = kGQA_groupsize;
     } else {
-        if (seq_len_q == 0 || seq_len_qk < use_moba_seq_limit) {
+        if (seq_len_q == 0 || seq_len_qk < use_plas_seq_limit) {
             return;
         }
         q_head_stride = head_num * kHeadDim;
@@ -233,7 +233,7 @@ __global__ void qk_gemm_kernel(
     auto smem_thr_copy_QK = smem_tiled_copy_QK.get_thread_slice(tidx);
     Tensor tsQK = smem_thr_copy_QK.partition_D(sQK);
 
-    const int n_blocks = is_split_kv ? 1 : cute::ceil_div(cute::ceil_div(seq_len_qk, kMobaBlockSize), kBlockN);
+    const int n_blocks = is_split_kv ? 1 : cute::ceil_div(cute::ceil_div(seq_len_qk, kPlasBlockSize), kBlockN);
 
     #pragma unroll
     for (int n_block = 0; n_block < n_blocks; ++n_block) {
@@ -271,7 +271,7 @@ __global__ void qk_gemm_kernel(
     }
 }
 
-template <typename input_type, int kBlockM, int kBlockN, int kMobaBlockSize, int kMaxN, bool is_split_kv>
+template <typename input_type, int kBlockM, int kBlockN, int kPlasBlockSize, int kMaxN, bool is_split_kv>
 void qk_gemm(
         const input_type *q_input,
         const input_type *k_gate_mean,
@@ -280,7 +280,7 @@ void qk_gemm(
         const int *seq_len_decoder,
         const int *cu_seq_q,
         const int *cu_seq_k,
-        const int use_moba_seq_limit,
+        const int use_plas_seq_limit,
         const int max_seq_q,
         const int max_seq_k,
         const int head_num,
@@ -292,7 +292,7 @@ void qk_gemm(
 
     dim3 grid_dims;
     const int num_m_block = (max_seq_q + kBlockM - 1) / kBlockM;
-    const int num_n_block = ((max_seq_k + kMobaBlockSize - 1) / kMobaBlockSize + kBlockN - 1) / kBlockN;
+    const int num_n_block = ((max_seq_k + kPlasBlockSize - 1) / kPlasBlockSize + kBlockN - 1) / kBlockN;
 
     if (is_split_kv) {
         grid_dims.x = num_n_block;
@@ -309,7 +309,7 @@ void qk_gemm(
     constexpr int smemqk = kBlockM * kBlockN * sizeof(input_type);
     const int smem_size = smemk + max(smemq, smemqk);
 
-    auto kernel = &qk_gemm_kernel<input_type, kBlockM, kBlockN, kMobaBlockSize, kMaxN, kHeadDim, is_split_kv>;
+    auto kernel = &qk_gemm_kernel<input_type, kBlockM, kBlockN, kPlasBlockSize, kMaxN, kHeadDim, is_split_kv>;
 
     if (smem_size >= 48 * 1024) {
        cudaFuncSetAttribute(
@@ -324,7 +324,7 @@ void qk_gemm(
         seq_len_decoder,
         cu_seq_q,
         cu_seq_k,
-        use_moba_seq_limit,
+        use_plas_seq_limit,
         max_seq_q,
         max_seq_k,
         head_num,
@@ -334,7 +334,7 @@ void qk_gemm(
 
 
 template <typename T>
-std::vector<paddle::Tensor> DispatchMobaQKGemm(
+std::vector<paddle::Tensor> DispatchPlasQKGemm(
         const paddle::Tensor& q_input,
         const paddle::Tensor& k_block_means,
         const paddle::Tensor& seq_len_encoder,
@@ -346,15 +346,15 @@ std::vector<paddle::Tensor> DispatchMobaQKGemm(
         const int head_num,
         const int kv_head_num,
         const bool is_split_kv,
-        const int use_moba_seq_limit) {
+        const int use_plas_seq_limit) {
 
-    constexpr int kMobaBlockSize = 128;
+    constexpr int kPlasBlockSize = 128;
     constexpr int kMaxN = 1024;
     const int batch_size = seq_len_encoder.dims()[0];
     using cute_type = typename cuteType<T>::type;
     if (is_split_kv) {
         paddle::Tensor qk_gate_weight = paddle::empty({batch_size, head_num, kMaxN}, q_input.dtype(), q_input.place());
-        qk_gemm<cute_type, 16, kMobaBlockSize, kMobaBlockSize, kMaxN, true>(
+        qk_gemm<cute_type, 16, kPlasBlockSize, kPlasBlockSize, kMaxN, true>(
             reinterpret_cast<const cute_type*>(q_input.data<T>()),
             reinterpret_cast<const cute_type*>(k_block_means.data<T>()),
             reinterpret_cast<cute_type*>(qk_gate_weight.data<T>()),
@@ -362,7 +362,7 @@ std::vector<paddle::Tensor> DispatchMobaQKGemm(
             seq_len_decoder.data<int>(),
             cu_seq_q.data<int>(),
             cu_seq_k.data<int>(),
-            use_moba_seq_limit,
+            use_plas_seq_limit,
             max_seq_q,
             max_seq_k,
             head_num,
@@ -376,7 +376,7 @@ std::vector<paddle::Tensor> DispatchMobaQKGemm(
         constexpr int kBlockN = 128;
         const int token_num = q_input.dims()[0];
         paddle::Tensor qk_gate_weight = paddle::empty({token_num, head_num, kMaxN}, q_input.dtype(), q_input.place());
-        qk_gemm<cute_type, kBlockM, kBlockN, kMobaBlockSize, kMaxN, false>(
+        qk_gemm<cute_type, kBlockM, kBlockN, kPlasBlockSize, kMaxN, false>(
             reinterpret_cast<cute_type *>(const_cast<T*>(q_input.data<T>())),
             reinterpret_cast<cute_type *>(const_cast<T*>(k_block_means.data<T>())),
             reinterpret_cast<cute_type *>(qk_gate_weight.data<T>()),
@@ -384,7 +384,7 @@ std::vector<paddle::Tensor> DispatchMobaQKGemm(
             seq_len_decoder.data<int>(),
             cu_seq_q.data<int>(),
             cu_seq_k.data<int>(),
-            use_moba_seq_limit,
+            use_plas_seq_limit,
             max_seq_q,
             max_seq_k,
             head_num,
@@ -395,7 +395,7 @@ std::vector<paddle::Tensor> DispatchMobaQKGemm(
     }
 }
 
-std::vector<paddle::Tensor> MobaQKGemm(
+std::vector<paddle::Tensor> PlasQKGemm(
         const paddle::Tensor& q_input,
         const paddle::Tensor& k_block_means,
         const paddle::Tensor& seq_len_encoder,
@@ -407,11 +407,11 @@ std::vector<paddle::Tensor> MobaQKGemm(
         const int head_num,
         const int kv_head_num,
         const bool is_split_kv,
-        const int use_moba_seq_limit) {
+        const int use_plas_seq_limit) {
 
     if (q_input.dtype() == paddle::DataType::FLOAT16) {
         return std::move(
-            DispatchMobaQKGemm<phi::dtype::float16>(
+            DispatchPlasQKGemm<phi::dtype::float16>(
                 q_input,
                 k_block_means,
                 seq_len_encoder,
@@ -423,12 +423,12 @@ std::vector<paddle::Tensor> MobaQKGemm(
                 head_num,
                 kv_head_num,
                 is_split_kv,
-                use_moba_seq_limit
+                use_plas_seq_limit
             )
         );
     } else if (q_input.dtype() == paddle::DataType::BFLOAT16) {
         return std::move(
-            DispatchMobaQKGemm<phi::dtype::bfloat16>(
+            DispatchPlasQKGemm<phi::dtype::bfloat16>(
                 q_input,
                 k_block_means,
                 seq_len_encoder,
@@ -440,13 +440,13 @@ std::vector<paddle::Tensor> MobaQKGemm(
                 head_num,
                 kv_head_num,
                 is_split_kv,
-                use_moba_seq_limit
+                use_plas_seq_limit
             )
         );
     }
 }
 
-PD_BUILD_OP(moba_qk_gemm)
+PD_BUILD_OP(plas_qk_gemm)
     .Inputs({
         "q_input",
         "k_block_means",
@@ -460,6 +460,6 @@ PD_BUILD_OP(moba_qk_gemm)
         "head_num: int",
         "kv_head_num: int",
         "is_split_kv: bool",
-        "use_moba_seq_limit: int"})
+        "use_plas_seq_limit: int"})
     .Outputs({"qk_gate_weight"})
-    .SetKernelFn(PD_KERNEL(MobaQKGemm));
+    .SetKernelFn(PD_KERNEL(PlasQKGemm));

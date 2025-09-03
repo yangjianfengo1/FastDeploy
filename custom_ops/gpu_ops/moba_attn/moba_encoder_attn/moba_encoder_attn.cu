@@ -36,9 +36,9 @@ auto get_gmem_layout(int token_num, int head_num) {
 
 template <typename Ktraits>
 __global__ void __launch_bounds__(Ktraits::kNWarps * cutlass::NumThreadsPerWarp, 1)
-    moba_encoder_attention_kernel(
+    plas_encoder_attention_kernel(
         CUTE_GRID_CONSTANT typename CollectiveMainloopAttn<Ktraits>::Params const mainloop_params,
-        CUTE_GRID_CONSTANT moba_encoder_attn_params const data_params) {
+        CUTE_GRID_CONSTANT plas_encoder_attn_params const data_params) {
 
     using Element = typename Ktraits::Element;
     using ElementAccum = typename Ktraits::ElementAccum;
@@ -127,7 +127,7 @@ __global__ void __launch_bounds__(Ktraits::kNWarps * cutlass::NumThreadsPerWarp,
             PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipeline>();
             PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipeline>();
 
-            collective_mainloop.load<Ktraits::UseMoba>(
+            collective_mainloop.load<Ktraits::UsePlas>(
                 mainloop_params,
                 pipeline_k,
                 pipeline_v,
@@ -155,7 +155,7 @@ __global__ void __launch_bounds__(Ktraits::kNWarps * cutlass::NumThreadsPerWarp,
         Tensor tOrO = partition_fragment_C(tiled_mma1, select<0, 2>(TileShape_MNK{}));
         Softmax<2 * (2 * kBlockM / NumMmaThreads)> softmax;
 
-        collective_mainloop.mma<Ktraits::UseMoba>(
+        collective_mainloop.mma<Ktraits::UsePlas>(
             mainloop_params,
             pipeline_k,
             pipeline_v,
@@ -191,7 +191,7 @@ __global__ void __launch_bounds__(Ktraits::kNWarps * cutlass::NumThreadsPerWarp,
 
 
 template<typename Kernel_traits>
-void run_moba_decoder_attn(moba_encoder_attn_params &params, cudaStream_t stream) {
+void run_plas_decoder_attn(plas_encoder_attn_params &params, cudaStream_t stream) {
     using Element = typename Kernel_traits::Element;
     using TileShape_MNK = typename Kernel_traits::TileShape_MNK;
     using ClusterShape = typename Kernel_traits::ClusterShape_MNK;
@@ -215,7 +215,7 @@ void run_moba_decoder_attn(moba_encoder_attn_params &params, cudaStream_t stream
     num_blocks_m = cutlass::ceil_div(num_blocks_m, size<0>(ClusterShape{})) * size<0>(ClusterShape{});
 
     void *kernel;
-    kernel = (void *)moba_encoder_attention_kernel<Kernel_traits>;
+    kernel = (void *)plas_encoder_attention_kernel<Kernel_traits>;
     int smem_size = sizeof(typename Kernel_traits::SharedStorage);
 
     if (smem_size >= 48 * 1024) {
@@ -236,18 +236,18 @@ void run_moba_decoder_attn(moba_encoder_attn_params &params, cudaStream_t stream
 
 
 template <int kBlockM, int kBlockN, int kMaxN, typename InputType>
-void run_moba_encoder_attn_hdim128(moba_encoder_attn_params &params, cudaStream_t stream) {
+void run_plas_encoder_attn_hdim128(plas_encoder_attn_params &params, cudaStream_t stream) {
 
     constexpr static int Headdim = 128;
     constexpr static int kNWarps = kBlockM / 16 + 4;
     constexpr static int kStages = 2;
 
-    using Ktraits = moba_encoder_attn_kernel_traits<Headdim, kBlockM, kBlockN, kNWarps, kStages, kMaxN, true, InputType>;
-    run_moba_decoder_attn<Ktraits>(params, stream);
+    using Ktraits = plas_encoder_attn_kernel_traits<Headdim, kBlockM, kBlockN, kNWarps, kStages, kMaxN, true, InputType>;
+    run_plas_decoder_attn<Ktraits>(params, stream);
 }
 
 template <typename T>
-void DispatchMobaEncoderAttn(
+void DispatchPlasEncoderAttn(
         const paddle::Tensor& q_input,
         const paddle::Tensor& k_input,
         const paddle::Tensor& v_input,
@@ -268,13 +268,13 @@ void DispatchMobaEncoderAttn(
 
     constexpr int kBlockM = 128;
     constexpr int kBlockN = 128;
-    constexpr int kMobaBlockSize = 128;
+    constexpr int kPlasBlockSize = 128;
     constexpr int kMaxN = 1024;
 
     using cute_type = typename cuteType<T>::type;
 
-    moba_encoder_attn_params params;
-    memset(&params, 0, sizeof(moba_encoder_attn_params));
+    plas_encoder_attn_params params;
+    memset(&params, 0, sizeof(plas_encoder_attn_params));
 
     params.q_ptr = reinterpret_cast<cute_type*>(const_cast<T*>(q_input.data<T>()));
     params.k_ptr = reinterpret_cast<cute_type*>(const_cast<T*>(k_input.data<T>()));
@@ -294,10 +294,10 @@ void DispatchMobaEncoderAttn(
     params.seq_len_encoder = const_cast<int*>(seq_len_encoder.data<int>());
     params.cu_seq_q_pack = const_cast<int*>(cu_seq_q_pack.data<int>());
 
-    run_moba_encoder_attn_hdim128<kBlockM, kBlockN, kMaxN, cute_type>(params, out.stream());
+    run_plas_encoder_attn_hdim128<kBlockM, kBlockN, kMaxN, cute_type>(params, out.stream());
 }
 
-void MobaEncoderAttn(
+void PlasEncoderAttn(
         const paddle::Tensor& q_input,
         const paddle::Tensor& k_input,
         const paddle::Tensor& v_input,
@@ -318,7 +318,7 @@ void MobaEncoderAttn(
     const int batch_size = seq_len_encoder.dims()[0];
     if (q_input.dtype() == paddle::DataType::FLOAT16) {
         return
-            DispatchMobaEncoderAttn<phi::dtype::float16>(
+            DispatchPlasEncoderAttn<phi::dtype::float16>(
                 q_input,
                 k_input,
                 v_input,
@@ -338,7 +338,7 @@ void MobaEncoderAttn(
                 max_input_length);
     } else if (q_input.dtype() == paddle::DataType::BFLOAT16) {
         return
-            DispatchMobaEncoderAttn<phi::dtype::bfloat16>(
+            DispatchPlasEncoderAttn<phi::dtype::bfloat16>(
                 q_input,
                 k_input,
                 v_input,
@@ -360,7 +360,7 @@ void MobaEncoderAttn(
 }
 
 
-PD_BUILD_OP(moba_encoder_attn)
+PD_BUILD_OP(plas_encoder_attn)
     .Inputs({
         "q_input",
         "k_input",
@@ -381,4 +381,4 @@ PD_BUILD_OP(moba_encoder_attn)
         "max_input_length: int"})
     .Outputs({"attn_out"})
     .SetInplaceMap({{"out", "attn_out"}})
-    .SetKernelFn(PD_KERNEL(MobaEncoderAttn));
+    .SetKernelFn(PD_KERNEL(PlasEncoderAttn));

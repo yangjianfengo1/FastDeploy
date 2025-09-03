@@ -15,7 +15,7 @@
 #include "paddle/extension.h"
 #include "moba_attn/moba_attn_utils.hpp"
 
-template <typename T, int knthreads, int moba_block_size, int kBlockM, int kBlockMaxN, int searchtimes>
+template <typename T, int knthreads, int plas_block_size, int kBlockM, int kBlockMaxN, int searchtimes>
 __global__ void qk_gate_sort_encoder_kernel(
         const T* qk_gate_weight,
         int * qk_gate_topk_idx,
@@ -24,7 +24,7 @@ __global__ void qk_gate_sort_encoder_kernel(
         const int* cu_seq_q,
         const int* cu_seq_k,
         const int* cu_seq_q_pack,
-        const int use_moba_seq_limit,
+        const int use_plas_seq_limit,
         const int max_seq_q,
         const int max_seq_k,
         const int head_num,
@@ -50,7 +50,7 @@ __global__ void qk_gate_sort_encoder_kernel(
 
     const int seq_len_k = (bidt + kBlockM + seq_len_decoder[bidb]);
 
-    const int seq_len_moba = seq_len_k / moba_block_size;
+    const int seq_len_plas = seq_len_k / plas_block_size;
 
     using SrcType = Vec<T, kPackSize>;
     using SrcType_f = Vec<float, kPackSize>;
@@ -65,7 +65,7 @@ __global__ void qk_gate_sort_encoder_kernel(
 
     const int store_idx = cu_seq_q_pack[bidb] / kBlockM * head_num * kBlockMaxN + bidh * kBlockMaxN + blockIdx.x * head_num * kBlockMaxN + tidx * kPackSize;
 
-    if (seq_len_k < use_moba_seq_limit) {
+    if (seq_len_k < use_plas_seq_limit) {
         #pragma unroll
         for (int i = 0; i < kPackSize; i++) {
             select_idx.data.elt[i] = 1;
@@ -75,7 +75,7 @@ __global__ void qk_gate_sort_encoder_kernel(
     }
 
     const int load_offset = (cu_seq_q[bidb] + bidt) * head_num * kBlockMaxN + bidh * kBlockMaxN + tidx * kPackSize;
-    const int data_len = seq_len_moba - tidx * kPackSize;
+    const int data_len = seq_len_plas - tidx * kPackSize;
 
     #pragma unroll
     for (int t = 0; t < kBlockM; t++) {
@@ -143,7 +143,7 @@ __global__ void qk_gate_sort_encoder_kernel(
     if (tidx == 0) {
         int cur_idx = 0;
         int idx = -1;
-        const int last_idx = seq_len_moba - 1;
+        const int last_idx = seq_len_plas - 1;
         while (last_idx + idx >= 0 && qk_gate_mem[last_idx + idx] == 0) {
             idx--;
         }
@@ -168,7 +168,7 @@ __global__ void qk_gate_sort_encoder_kernel(
     *reinterpret_cast<SrcType_i *>(qk_gate_topk_idx + store_idx) = reinterpret_cast<SrcType_i *>(qk_continue_idx_mem)[tidx];
 }
 
-template <int kBlockM, int kMaxN, int moba_block_size, typename T>
+template <int kBlockM, int kMaxN, int plas_block_size, typename T>
 void qk_gate_sort_encoder(
         const T* qk_gate_weight,
         int * qk_gate_topk_idx,
@@ -177,7 +177,7 @@ void qk_gate_sort_encoder(
         const int* cu_seq_q,
         const int* cu_seq_k,
         const int* cu_seq_q_pack,
-        const int use_moba_seq_limit,
+        const int use_plas_seq_limit,
         const int max_seq_q,
         const int max_seq_k,
         const int head_num,
@@ -198,7 +198,7 @@ void qk_gate_sort_encoder(
     grid_dims.y = head_num;
     grid_dims.z = batch_size;
 
-    constexpr auto kernel = qk_gate_sort_encoder_kernel<T, knthreads, moba_block_size, kBlockM, kMaxN, searchtimes>;
+    constexpr auto kernel = qk_gate_sort_encoder_kernel<T, knthreads, plas_block_size, kBlockM, kMaxN, searchtimes>;
 
     kernel<<<grid_dims, knthreads, 0, stream>>>(
         qk_gate_weight,
@@ -208,7 +208,7 @@ void qk_gate_sort_encoder(
         cu_seq_q,
         cu_seq_k,
         cu_seq_q_pack,
-        use_moba_seq_limit,
+        use_plas_seq_limit,
         max_seq_q,
         max_seq_k,
         head_num,
@@ -232,17 +232,17 @@ std::vector<paddle::Tensor> DispatchQkSortEncoder(
         const int kv_head_num,
         const int top_k_left,
         const int top_k_right,
-        const int use_moba_seq_limit) {
+        const int use_plas_seq_limit) {
     constexpr int kBlockM = 128;
     constexpr int kBlockN = 128;
-    constexpr int kMobaBlockSize = 128;
+    constexpr int kPlasBlockSize = 128;
     constexpr int kMaxN = 1024;
     using cute_type = typename cuteType<T>::type;
     const int batch_size = seq_len_encoder.dims()[0];
 
     paddle::Tensor qk_gate_topk_idx = paddle::empty({q_pack_tokens.data<int>()[0] / kBlockM, head_num, kMaxN}, paddle::DataType::INT32, qk_gate_weight.place());
 
-    qk_gate_sort_encoder<kBlockM, kMaxN, kMobaBlockSize, cute_type>(
+    qk_gate_sort_encoder<kBlockM, kMaxN, kPlasBlockSize, cute_type>(
             reinterpret_cast<const cute_type *>(qk_gate_weight.data<T>()),
             qk_gate_topk_idx.data<int>(),
             seq_len_encoder.data<int>(),
@@ -250,7 +250,7 @@ std::vector<paddle::Tensor> DispatchQkSortEncoder(
             cu_seq_q.data<int>(),
             cu_seq_k.data<int>(),
             cu_seq_q_pack.data<int>(),
-            use_moba_seq_limit,
+            use_plas_seq_limit,
             max_seq_q,
             max_seq_k,
             head_num,
@@ -278,7 +278,7 @@ std::vector<paddle::Tensor> QkSortEncoder(
         const int kv_head_num,
         const int top_k_left,
         const int top_k_right,
-        const int use_moba_seq_limit) {
+        const int use_plas_seq_limit) {
     if (qk_gate_weight.dtype() == paddle::DataType::FLOAT16) {
         return std::move(
             DispatchQkSortEncoder<phi::dtype::float16>(
@@ -295,7 +295,7 @@ std::vector<paddle::Tensor> QkSortEncoder(
                 kv_head_num,
                 top_k_left,
                 top_k_right,
-                use_moba_seq_limit
+                use_plas_seq_limit
             )
         );
     } else if (qk_gate_weight.dtype() == paddle::DataType::BFLOAT16) {
@@ -314,13 +314,13 @@ std::vector<paddle::Tensor> QkSortEncoder(
                 kv_head_num,
                 top_k_left,
                 top_k_right,
-                use_moba_seq_limit
+                use_plas_seq_limit
             )
         );
     }
 }
 
-PD_BUILD_OP(moba_qk_sort_encoder)
+PD_BUILD_OP(plas_qk_sort_encoder)
     .Inputs({
         "qk_gate_weight",
         "seq_len_encoder",
@@ -336,6 +336,6 @@ PD_BUILD_OP(moba_qk_sort_encoder)
         "kv_head_num: int",
         "top_k_left: int",
         "top_k_right: int",
-        "use_moba_seq_limit: int"})
+        "use_plas_seq_limit: int"})
     .Outputs({"qk_gate_topk_idx"})
     .SetKernelFn(PD_KERNEL(QkSortEncoder));

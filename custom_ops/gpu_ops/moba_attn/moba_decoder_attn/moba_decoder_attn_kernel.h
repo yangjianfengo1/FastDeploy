@@ -21,7 +21,7 @@
 
 using namespace cute;
 template <typename T>
-struct moba_decoder_attn_params {
+struct plas_decoder_attn_params {
     T *__restrict__ q_input;
     void *__restrict__ cache_k;
     void *__restrict__ cache_v;
@@ -50,7 +50,7 @@ struct moba_decoder_attn_params {
     int max_num_partitions;
     float inv_sqrt_dh;
     int *qk_gate_topk_idx_ptr;
-    int use_moba_seq_limit;
+    int use_plas_seq_limit;
 };
 
 template <typename cute_type_, int DataBits_>
@@ -121,7 +121,7 @@ struct CacheKV_quant_traits {
 };
 
 template <int kGqaGroupSize_, int kTileN_, int kMaxN_, typename CacheKV_traits_>
-struct moba_decoder_attn_kernel_traits {
+struct plas_decoder_attn_kernel_traits {
     using ElementAccum = float;
     using CacheKV_traits = CacheKV_traits_;
     using cuteType = typename CacheKV_traits::cuteType;

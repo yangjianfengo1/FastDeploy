@@ -17,8 +17,8 @@
 #include "moba_attn/moba_attn.h"
 
 
-template <typename T, int moba_block_size, int kHeadDim, int kMaxN>
-__global__ void moba_mlp_einsum_kernel(
+template <typename T, int plas_block_size, int kHeadDim, int kMaxN>
+__global__ void plas_mlp_einsum_kernel(
         const T * src_data,
         const T * weight_data,
         const int * seq_lens_encoder,
@@ -40,7 +40,7 @@ __global__ void moba_mlp_einsum_kernel(
     const int seq_len_encoder = seq_lens_encoder[bidb];
     const int seq_len_decoder = seq_len_encoder + seq_lens_decoder[bidb];
 
-    const int seq_len_this_block = seq_len_decoder - block_idx * moba_block_size;
+    const int seq_len_this_block = seq_len_decoder - block_idx * plas_block_size;
 
     if (seq_len_encoder == 0 || seq_len_this_block <= 0) {
         return;
@@ -54,8 +54,8 @@ __global__ void moba_mlp_einsum_kernel(
     const int row_idx = tidx / tidx_per_row;
     const int col_idx = tidx % tidx_per_row * kPackSize;
 
-    const int src_base_idx = cu_seq_k[bidb] * head_num * kHeadDim + block_idx * moba_block_size * head_num * kHeadDim + bidh * kHeadDim + row_idx * head_num * kHeadDim + col_idx;
-    const int weight_base_idx = bidh * kHeadDim * moba_block_size + row_idx * kHeadDim + col_idx;
+    const int src_base_idx = cu_seq_k[bidb] * head_num * kHeadDim + block_idx * plas_block_size * head_num * kHeadDim + bidh * kHeadDim + row_idx * head_num * kHeadDim + col_idx;
+    const int weight_base_idx = bidh * kHeadDim * plas_block_size + row_idx * kHeadDim + col_idx;
 
     constexpr int step = 128 / tidx_per_row;
 
@@ -63,7 +63,7 @@ __global__ void moba_mlp_einsum_kernel(
 
     sums.set_zero();
 
-    for (int i = 0; i < moba_block_size; i += step) {
+    for (int i = 0; i < plas_block_size; i += step) {
         if (i >= seq_len_this_block) {
             break;
         }
@@ -105,35 +105,35 @@ __global__ void moba_mlp_einsum_kernel(
 
     sums.load_from(local_sum_mem + store_col_id);
 
-    const int base_store_idx = bidb * kMaxN * head_num * kHeadDim + (block_idx * (moba_block_size / 128) + store_row_id) * head_num * kHeadDim + bidh * kHeadDim + store_col_id;
+    const int base_store_idx = bidb * kMaxN * head_num * kHeadDim + (block_idx * (plas_block_size / 128) + store_row_id) * head_num * kHeadDim + bidh * kHeadDim + store_col_id;
 
-    if (store_row_id < moba_block_size / 128) {
+    if (store_row_id < plas_block_size / 128) {
         sums.store_to(dst_data + base_store_idx);
     }
 }
 
 
 template <typename T, int kHeadDim, int kMaxN>
-void moba_mlp_einsum(
+void plas_mlp_einsum(
         const T * src_data,
         const T * weight_data,
         const int * seq_lens_encoder,
         const int * seq_lens_decoder,
         const int * cu_seq_k,
         T * dst_data,
-        const int moba_block_size,
+        const int plas_block_size,
         const int max_seq_len,
         const int head_num,
         const int batch_size,
         cudaStream_t stream) {
 
     dim3 grid_dims;
-    grid_dims.x = (max_seq_len + moba_block_size - 1) / moba_block_size;
+    grid_dims.x = (max_seq_len + plas_block_size - 1) / plas_block_size;
     grid_dims.y = head_num;
     grid_dims.z = batch_size;
 
-    if (moba_block_size == 1024) {
-        moba_mlp_einsum_kernel<T, 1024, kHeadDim, kMaxN><<<grid_dims, 128, 0, stream>>>(
+    if (plas_block_size == 1024) {
+        plas_mlp_einsum_kernel<T, 1024, kHeadDim, kMaxN><<<grid_dims, 128, 0, stream>>>(
             src_data,
             weight_data,
             seq_lens_encoder,
@@ -141,8 +141,8 @@ void moba_mlp_einsum(
             cu_seq_k,
             dst_data,
             head_num);
-    } else if (moba_block_size == 128) {
-        moba_mlp_einsum_kernel<T, 128, kHeadDim, kMaxN><<<grid_dims, 128, 0, stream>>>(
+    } else if (plas_block_size == 128) {
+        plas_mlp_einsum_kernel<T, 128, kHeadDim, kMaxN><<<grid_dims, 128, 0, stream>>>(
             src_data,
             weight_data,
             seq_lens_encoder,
@@ -152,13 +152,13 @@ void moba_mlp_einsum(
             head_num);
     } else {
         PADDLE_THROW(phi::errors::Unimplemented(
-            "MobaMlpEinsum not implemented for moba_block_size = %d", moba_block_size));
+            "PlasMlpEinsum not implemented for plas_block_size = %d", plas_block_size));
     }
 
 }
 
 
-std::vector<paddle::Tensor> MobaMlpEinsum(
+std::vector<paddle::Tensor> PlasMlpEinsum(
         const paddle::Tensor& k_input,
         const paddle::Tensor& attn_gate_weight,
         const paddle::Tensor& seq_lens_encoder,
@@ -169,20 +169,20 @@ std::vector<paddle::Tensor> MobaMlpEinsum(
 
     const int kHeadDim = 128;
     const int kMaxN = 1024;
-    const int moba_block_size = attn_gate_weight.dims()[1];
+    const int plas_block_size = attn_gate_weight.dims()[1];
     const int batch_size = seq_lens_encoder.dims()[0];
     paddle::Tensor k_gate_weight = paddle::zeros({batch_size, kMaxN, kv_head_num, kHeadDim}, k_input.dtype(), k_input.place());
 
     if (k_input.dtype() == paddle::DataType::FLOAT16) {
         using T = phi::dtype::float16;
-        moba_mlp_einsum<T, kHeadDim, kMaxN>(
+        plas_mlp_einsum<T, kHeadDim, kMaxN>(
             const_cast<T*>(k_input.data<T>()),
             const_cast<T*>(attn_gate_weight.data<T>()),
             const_cast<int*>(seq_lens_encoder.data<int>()),
             const_cast<int*>(seq_lens_decoder.data<int>()),
             const_cast<int*>(cu_seq_k.data<int>()),
             k_gate_weight.data<T>(),
-            moba_block_size,
+            plas_block_size,
             max_seq_len,
             kv_head_num,
             batch_size,
@@ -190,14 +190,14 @@ std::vector<paddle::Tensor> MobaMlpEinsum(
         );
     } else if (k_input.dtype() == paddle::DataType::BFLOAT16) {
         using T = phi::dtype::bfloat16;
-        moba_mlp_einsum<T, kHeadDim, kMaxN>(
+        plas_mlp_einsum<T, kHeadDim, kMaxN>(
             const_cast<T*>(k_input.data<T>()),
             const_cast<T*>(attn_gate_weight.data<T>()),
             const_cast<int*>(seq_lens_encoder.data<int>()),
             const_cast<int*>(seq_lens_decoder.data<int>()),
             const_cast<int*>(cu_seq_k.data<int>()),
             k_gate_weight.data<T>(),
-            moba_block_size,
+            plas_block_size,
             max_seq_len,
             kv_head_num,
             batch_size,
@@ -207,7 +207,7 @@ std::vector<paddle::Tensor> MobaMlpEinsum(
     return {k_gate_weight};
 }
 
-PD_BUILD_OP(moba_mlp_einsum)
+PD_BUILD_OP(plas_mlp_einsum)
     .Inputs({
         "k_input",
         "attn_gate_weight",
@@ -218,4 +218,4 @@ PD_BUILD_OP(moba_mlp_einsum)
         "max_seq_len: int",
         "kv_head_num: int"})
     .Outputs({"k_gate"})
-    .SetKernelFn(PD_KERNEL(MobaMlpEinsum));
+    .SetKernelFn(PD_KERNEL(PlasMlpEinsum));

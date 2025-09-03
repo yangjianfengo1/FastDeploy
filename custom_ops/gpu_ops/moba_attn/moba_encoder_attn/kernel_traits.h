@@ -29,7 +29,7 @@
 
 using namespace cute;
 
-struct moba_encoder_attn_params {
+struct plas_encoder_attn_params {
     void *__restrict__ q_ptr;
     void *__restrict__ k_ptr;
     void *__restrict__ v_ptr;
@@ -46,7 +46,7 @@ struct moba_encoder_attn_params {
     int batch_size;
     int gqa_group_size;
     float scale_softmax_log2;
-    int use_moba_seq_limit;
+    int use_plas_seq_limit;
 };
 
 template <int kStages, class Gemm1Type, class Gemm2Type, class OutputType, class SmemLayoutQ,
@@ -65,8 +65,8 @@ struct SharedStorageQKVO {
     };
 };
 
-template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, int kStages_, int kMaxN_, bool UseMoba_, typename elem_type=cutlass::half_t>
-struct moba_encoder_attn_kernel_traits {
+template<int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, int kStages_, int kMaxN_, bool UsePlas_, typename elem_type=cutlass::half_t>
+struct plas_encoder_attn_kernel_traits {
     using Element = elem_type;
     using ElementAccum = float;
     using index_t = int32_t;
@@ -74,7 +74,7 @@ struct moba_encoder_attn_kernel_traits {
     static constexpr int kNWarps = kNWarps_;
     static constexpr int kNThreads = kNWarps * cutlass::NumThreadsPerWarp;
 
-    static constexpr int UseMoba = UseMoba_;
+    static constexpr int UsePlas = UsePlas_;
 
     static constexpr int kBlockM = kBlockM_;
     static constexpr int kBlockN = kBlockN_;
